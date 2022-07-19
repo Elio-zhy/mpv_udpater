@@ -1,10 +1,12 @@
+$proxy = "http://127.0.0.1:1080"
+
 function Check-7z {
     $7zdir = (Get-Location).Path + "\7z"
-    if (-not (Test-Path ($7zdir + "\7za.exe")) -and -not (Test-Path (Get-Command "7z.exe").Path))
+    if (-not (Test-Path ($7zdir + "\7za.exe")) -and -not (Test-Path ([Environment]::ExpandEnvironmentVariables("%Programs%\7-Zip\7z.exe"))))
     {
         $download_file = (Get-Location).Path + "\7z.zip"
         Write-Host "Downloading 7z" -ForegroundColor Green
-        Invoke-WebRequest -Uri "https://download.sourceforge.net/sevenzip/7za920.zip" -UserAgent [Microsoft.PowerShell.Commands.PSUserAgent]::FireFox -OutFile $download_file
+        Invoke-WebRequest -Uri "https://download.sourceforge.net/sevenzip/7za920.zip" -UserAgent [Microsoft.PowerShell.Commands.PSUserAgent]::FireFox -OutFile $download_file -Proxy $proxy
         Write-Host "Extracting 7z" -ForegroundColor Green
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         [System.IO.Compression.ZipFile]::ExtractToDirectory($download_file, $7zdir)
@@ -26,21 +28,56 @@ function Check-PowershellVersion {
     }
 }
 
+function Check-Ytplugin {
+    $ytdlp = Get-ChildItem "yt-dlp*.exe" -ErrorAction Ignore
+    $youtubedl = Get-ChildItem "youtube-dl.exe" -ErrorAction Ignore
+    if ($ytdlp) {
+        return $ytdlp.ToString()
+    }
+    elseif ($youtubedl) {
+        return $youtubedl.ToString()
+    }
+    else {
+        return $null
+    }
+}
+
 function Check-Mpv {
     $mpv = (Get-Location).Path + "\mpv.exe"
     $is_exist = Test-Path $mpv
     return $is_exist
 }
 
-function Download-Mpv ($filename, $link) {
+function Download-Archive ($filename, $link) {
     Write-Host "Downloading" $filename -ForegroundColor Green
-    $global:progressPreference = 'Continue'
-    Invoke-WebRequest -Uri $link -UserAgent [Microsoft.PowerShell.Commands.PSUserAgent]::FireFox -OutFile $filename
+    Invoke-WebRequest -Uri $link -UserAgent [Microsoft.PowerShell.Commands.PSUserAgent]::FireFox -OutFile $filename -Proxy $proxy
 }
 
-function Extract-Mpv ($file) {
-    if (Test-Path (Get-Command "7z.exe").Path) {
-        & (Get-Command "7z.exe").Path x -y $file | FIND "Extracting archive" | Write-Host -ForegroundColor Green
+function Download-Ytplugin ($plugin, $version) {
+    $link = ""
+    $plugin_exe = ""
+    switch -wildcard ($plugin) {
+        "yt-dlp*" {
+            Write-Host "Downloading $plugin ($version)" -ForegroundColor Green
+            $32bit = ""
+            if (-Not (Test-Path (Join-Path $env:windir "SysWow64"))) {
+                $32bit = "_x86"
+            }
+            $link = -join("https://github.com/yt-dlp/yt-dlp/releases/download/", $version, "/", $plugin, $32bit, ".exe")
+            $plugin_exe = -join($plugin, $32bit, ".exe")
+        }
+        "youtube-dl" {
+            Write-Host "Downloading $plugin ($version)" -ForegroundColor Green
+            $link = -join("https://yt-dl.org/downloads/", $version, "/youtube-dl.exe")
+            $plugin_exe = "youtube-dl.exe"
+        }
+    }
+    Invoke-WebRequest -Uri $link -UserAgent [Microsoft.PowerShell.Commands.PSUserAgent]::FireFox -OutFile $plugin_exe -Proxy $proxy
+}
+
+function Extract-Archive ($file) {
+    if (Test-Path ([Environment]::ExpandEnvironmentVariables("%Programs%\7-Zip\7z.exe"))) {
+        & ([Environment]::ExpandEnvironmentVariables("%Programs%\7-Zip\7z.exe")) x -y $file | FIND "Extracting archive" | Write-Host -ForegroundColor Green
     }
     else {
         $7za = (Get-Location).Path + "\7z\7za.exe"
@@ -55,7 +92,7 @@ function Get-Latest-Mpv($Arch, $channel) {
     switch -wildcard ($channel) {
         "daily" {
             $api_gh = "https://api.github.com/repos/shinchiro/mpv-winbuild-cmake/releases/latest"
-            $json = Invoke-WebRequest $api_gh -MaximumRedirection 0 -ErrorAction Ignore -UseBasicParsing | ConvertFrom-Json
+            $json = Invoke-WebRequest $api_gh -MaximumRedirection 0 -ErrorAction Ignore -UseBasicParsing -Proxy $proxy | ConvertFrom-Json
             $filename = $json.assets | where { $_.name -Match "mpv-$Arch" } | Select-Object -ExpandProperty name
             $download_link = $json.assets | where { $_.name -Match "mpv-$Arch" } | Select-Object -ExpandProperty browser_download_url
         }
@@ -76,6 +113,35 @@ function Get-Latest-Mpv($Arch, $channel) {
             $download_link = "https://download.sourceforge.net/mpv-player-windows/" + $filename
         }
     }
+    return $filename, $download_link
+}
+
+function Get-Latest-Ytplugin ($plugin) {
+    switch -wildcard ($plugin) {
+        "yt-dlp*" {
+            $link = "https://github.com/yt-dlp/yt-dlp/releases.atom"
+            Write-Host "Fetching RSS feed for ytp-dlp" -ForegroundColor Green
+            $resp = [xml](Invoke-WebRequest $link -MaximumRedirection 0 -ErrorAction Ignore -UseBasicParsing -Proxy $proxy).Content
+            $link = $resp.feed.entry[0].link.href
+            $version = $link.split("/")[-1]
+            return $version
+        }
+        "youtube-dl" {
+            $link = "https://yt-dl.org/downloads/latest/youtube-dl.exe"
+            Write-Host "Fetching RSS feed for youtube-dl" -ForegroundColor Green
+            $resp = Invoke-WebRequest $link -MaximumRedirection 0 -ErrorAction Ignore -UseBasicParsing -Proxy $proxy
+            $redirect_link = $resp.Headers.Location
+            $version = $redirect_link.split("/")[4]
+            return $version
+        }
+    }
+}
+
+function Get-Latest-FFmpeg ($Arch) {
+    $api_gh = "https://api.github.com/repos/shinchiro/mpv-winbuild-cmake/releases/latest"
+    $json = Invoke-WebRequest $api_gh -MaximumRedirection 0 -ErrorAction Ignore -UseBasicParsing -Proxy $proxy | ConvertFrom-Json
+    $filename = $json.assets | where { $_.name -Match "ffmpeg-$Arch" } | Select-Object -ExpandProperty name
+    $download_link = $json.assets | where { $_.name -Match "ffmpeg-$Arch" } | Select-Object -ExpandProperty browser_download_url
     return $filename, $download_link
 }
 
@@ -145,6 +211,7 @@ function Create-XML {
 <settings>
   <channel>unset</channel>
   <autodelete>unset</autodelete>
+  <getffmpeg>unset</getffmpeg>
 </settings>
 "@ | Set-Content "settings.xml" -Encoding UTF8
 }
@@ -161,6 +228,9 @@ function Check-ChannelRelease {
         }
         elseif ($result -eq 'D2') {
             $channel = "daily"
+        }
+        else {
+            throw "Please enter valid input key."
         }
         Create-XML
         [xml]$doc = Get-Content $file
@@ -181,13 +251,16 @@ function Check-Autodelete($archive) {
     if (-not (Test-Path $file)) { exit }
     [xml]$doc = Get-Content $file
     if ($doc.settings.autodelete -eq "unset") {
-        $result = Read-KeyOrTimeout "Delete mpv archives after extract? [Y/n] (default=Y)" "Y"
+        $result = Read-KeyOrTimeout "Delete archives after extract? [Y/n] (default=Y)" "Y"
         Write-Host ""
         if ($result -eq 'Y') {
             $autodelete = "true"
         }
         elseif ($result -eq 'N') {
             $autodelete = "false"
+        }
+        else {
+            throw "Please enter valid input key."
         }
         $doc.settings.autodelete = $autodelete
         $doc.Save($file)
@@ -198,6 +271,41 @@ function Check-Autodelete($archive) {
             Remove-Item -Force $archive
         }
     }
+}
+
+function Check-GetFFmpeg() {
+    $get_ffmpeg = ""
+    $file = "settings.xml"
+
+    if (-not (Test-Path $file)) { exit }
+    [xml]$doc = Get-Content $file
+    if ($doc.settings.getffmpeg -eq "unset") {
+        Write-Host "FFmpeg doesn't exist. " -ForegroundColor Green -NoNewline
+        $result = Read-KeyOrTimeout "Proceed with downloading? [Y/n] (default=n)" "N"
+        Write-Host ""
+        if ($result -eq 'Y') {
+            $get_ffmpeg = "true"
+        }
+        elseif ($result -eq 'N') {
+            $get_ffmpeg = "false"
+        }
+        else {
+            throw "Please enter valid input key."
+        }
+        $doc.settings.getffmpeg = $get_ffmpeg
+        $doc.Save($file)
+    }
+    else {
+        $get_ffmpeg = $doc.settings.getffmpeg
+    }
+    return $get_ffmpeg
+}
+
+function Fetch-Updater {
+    $download_link = "https://raw.githubusercontent.com/Elio-zhy/mpv_udpater/master/updater.ps1"
+    $file_path = [System.IO.Path]::Combine((Get-Location).Path, "installer\updater.ps1")
+
+    Invoke-WebRequest -Uri $download_link -UserAgent [Microsoft.PowerShell.Commands.PSUserAgent]::FireFox -OutFile $file_path -Proxy $proxy
 }
 
 function Upgrade-Mpv {
@@ -237,7 +345,7 @@ function Upgrade-Mpv {
         $result = Read-KeyOrTimeout "Proceed with downloading? [Y/n] (default=y)" "Y"
         Write-Host ""
 
-        if ($result -eq "Y") {
+        if ($result -eq 'Y') {
             $need_download = $true
             if (Test-Path (Join-Path $env:windir "SysWow64")) {
                 Write-Host "Detecting System Type is 64-bit" -ForegroundColor Green
@@ -250,17 +358,103 @@ function Upgrade-Mpv {
             $channel = Check-ChannelRelease
             $remoteName, $download_link = Get-Latest-Mpv $arch $channel
         }
-        else {
+        elseif ($result -eq 'N') {
             $need_download = $false
+        }
+        else {
+            throw "Please enter valid input key."
         }
     }
 
     if ($need_download) {
-        Download-Mpv $remoteName $download_link
+        Download-Archive $remoteName $download_link
         Check-7z
-        Extract-Mpv $remoteName
+        Extract-Archive $remoteName
     }
     Check-Autodelete $remoteName
+}
+
+function Upgrade-Ytplugin {
+    $yt = Check-Ytplugin
+    if ($yt) {
+        $latest_release = Get-Latest-Ytplugin((Get-Item $yt).BaseName)
+        if ((& $yt --version) -match ($latest_release)) {
+            Write-Host "You are already using latest" (Get-Item $yt).BaseName "-- $latest_release" -ForegroundColor Green
+        }
+        else {
+            Write-Host "Newer" (Get-Item $yt).BaseName "build available" -ForegroundColor Green
+            & $yt --update
+        }
+    }
+    else {
+        Write-Host "ytdlp or youtube-dl doesn't exist. " -ForegroundColor Green -NoNewline
+        $result = Read-KeyOrTimeout "Proceed with downloading? [Y/n] (default=n)" "N"
+        Write-Host ""
+
+        if ($result -eq 'Y') {
+            $result_exe = Read-KeyOrTimeout "Download ytdlp or youtubedl? [1=ytdlp/2=youtubedl] (default=1)" "D1"
+            Write-Host ""
+            if ($result_exe -eq 'D1') {
+                $latest_release = Get-Latest-Ytplugin "yt-dlp"
+                Download-Ytplugin "yt-dlp" $latest_release
+            }
+            elseif ($result_exe -eq 'D2') {
+                $latest_release = Get-Latest-Ytplugin "youtube-dl"
+                Download-Ytplugin "youtube-dl" $latest_release
+            }
+            else {
+                throw "Please enter valid input key."
+            }
+        }
+    }
+}
+
+function Upgrade-FFmpeg {
+    $get_ffmpeg = Check-GetFFmpeg
+    if ($get_ffmpeg -eq "false") {
+        exit
+    }
+
+    if (Test-Path (Join-Path $env:windir "SysWow64")) {
+        $arch = "x86_64"
+    }
+    else {
+        $arch = "i686"
+    }
+
+    $need_download = $false
+    $remote_name, $download_link = Get-Latest-FFmpeg $arch
+    $ffmpeg = (Get-Location).Path + "\ffmpeg.exe"
+    $ffmpeg_exist = Test-Path $ffmpeg
+
+    if ($ffmpeg_exist) {
+        $ffmpeg_file = .\ffmpeg -version | select-string "ffmpeg" | select-object -First 1
+        $file_pattern = "git-[0-9-]+([a-z0-9-]{8})"
+        $url_pattern = "git-([a-z0-9-]{8})"
+        $bool = $ffmpeg_file -match $file_pattern
+        $local_git = $matches[1]
+        $bool = $remote_name -match $url_pattern
+        $remote_git = $matches[1]
+
+        if ($local_git -match $remote_git) {
+            Write-Host "You are already using latest ffmpeg build -- $remote_name" -ForegroundColor Green
+            $need_download = $false
+        }
+        else {
+            Write-Host "Newer ffmpeg build available" -ForegroundColor Green
+            $need_download = $true
+        }
+    }
+    else {
+        $need_download = $true
+    }
+
+    if ($need_download) {
+        Download-Archive $remote_name $download_link
+        Check-7z
+        Extract-Archive $remote_name
+    }
+    Check-Autodelete $remote_name
 }
 
 function Read-KeyOrTimeout ($prompt, $key){
@@ -308,7 +502,11 @@ try {
     Check-PowershellVersion
     # Sourceforge only support TLS 1.2
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $global:progressPreference = 'silentlyContinue'
     Upgrade-Mpv
+    Upgrade-Ytplugin
+    Upgrade-FFmpeg
+    Fetch-Updater
     Write-Host "Operation completed" -ForegroundColor Magenta
 }
 catch [System.Exception] {
